@@ -15,9 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <algorithm>
+#include <set>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "ncnn/net.h"
@@ -39,8 +38,13 @@ struct hn_net {
     int pixel_format = HN_PIX_RGB;
     float mean[3] = {0.f, 0.f, 0.f};
     float norm[3] = {1.f, 1.f, 1.f};
-    std::string input_blob = "in0"; // strdup'd copy — owns the lifetime
-    std::vector<int> output_blobs;
+    std::string input_blob = "in0"; // owns the lifetime
+    std::vector<std::string> output_blobs;
+    bool has_reshape = false;
+    // Warm-up size for shape hints; 0 = auto (64x64, or skip when the
+    // graph is input-size-locked — see hn_load).
+    int warmup_w = 0;
+    int warmup_h = 0;
     // 5 ints per output: [dims, w, h, d, c]; dims == 0 = no hint.
     std::vector<int> output_shape_hints;
 };
@@ -97,7 +101,11 @@ int pixel_type(int fmt) {
 }
 
 int channel_count(int fmt) {
-    return fmt == HN_PIX_GRAY ? 1 : 3;
+    // Source-buffer channel count. PIXEL_RGBA/PIXEL_BGRA make from_pixels
+    // read w*h*4 source bytes (it converts to 3 channels internally), so
+    // the caller's buffer is 4 bytes per pixel.
+    return fmt == HN_PIX_GRAY ? 1
+         : (fmt == HN_PIX_RGBA || fmt == HN_PIX_BGRA) ? 4 : 3;
 }
 
 void set_options(ncnn::Net& net, int use_vulkan, int device_index) {
@@ -117,52 +125,111 @@ void set_options(ncnn::Net& net, int use_vulkan, int device_index) {
 #endif
 }
 
-// Parse a param file for graph output blobs: ids produced but never
+// Parse a param file for graph output blobs: names produced but never
 // consumed by any layer. Empty result falls back to blobs consumed by
-// Noop layers (onnx2ncnn marks outputs that way). Ascending blob-id
-// order for deterministic output indexing.
-bool parse_output_blobs(const char* path, std::vector<int>* out) {
+// Noop layers (onnx2ncnn marks outputs that way). Ascending name order
+// (std::set iteration) for deterministic output indexing. When the file
+// contains any Reshape layer, *has_reshape is set — hn_load uses that to
+// skip the auto warm-up (Reshape dims are often tied to the trained
+// input size; see hn_load).
+//
+// Line-based on purpose: pnnx-converted params use NAMED blob tokens
+// ("Input in0 0 1 in0", "Softmax softmax_76 1 1 141 out0") and carry
+// key=value layer params after the out-blob list — a whole-file token
+// scanner desynchronizes on both. Here each layer line is tokenized
+// independently and everything after the out-blob list is ignored.
+// Numeric-blob files ("141") parse identically: blob ids are just
+// strings, so both formats are handled uniformly.
+char* next_token(char** pp) {
+    char* p = *pp;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p == '\0') {
+        *pp = p;
+        return nullptr;
+    }
+    char* start = p;
+    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\r' &&
+           *p != '\n') {
+        p++;
+    }
+    if (*p != '\0') {
+        *p = '\0';
+        p++;
+    }
+    *pp = p;
+    return start;
+}
+
+bool parse_output_blobs(const char* path, std::vector<std::string>* out,
+                        bool* has_reshape) {
     FILE* f = fopen(path, "rb");
     if (f == nullptr) return false;
-    char line[1024];
-    if (fgets(line, sizeof(line), f) == nullptr) { fclose(f); return false; }
-    int layer_count = 0, blob_count = 0;
-    if (fscanf(f, "%d %d", &layer_count, &blob_count) != 2) {
-        fclose(f);
-        return false;
+    char line[8192];
+    int layer_count = 0;
+    bool ok = false;
+    std::set<std::string> produced, consumed, noop_consumed;
+    // Line 1 is the magic ("7767517"); line 2 is "layer_count blob_count".
+    // Tolerate a missing magic by accepting a two-int first line.
+    if (fgets(line, sizeof(line), f) != nullptr) {
+        int blob_count = 0;
+        if (sscanf(line, "%d %d", &layer_count, &blob_count) == 2 &&
+            layer_count > 0) {
+            ok = true; // old-format file: first line IS the counts
+        } else if (fgets(line, sizeof(line), f) != nullptr) {
+            ok = sscanf(line, "%d %d", &layer_count, &blob_count) == 2 &&
+                 layer_count > 0;
+        }
     }
-    fgets(line, sizeof(line), f); // consume EOL after the counts
-    std::unordered_set<int> produced, consumed, noop_consumed;
-    bool ok = true;
-    for (int i = 0; i < layer_count && ok; i++) {
-        char type[256], name[256];
+    for (int i = 0; ok && i < layer_count; i++) {
+        if (fgets(line, sizeof(line), f) == nullptr) {
+            ok = false;
+            break;
+        }
+        char* cursor = line;
+        char* type = next_token(&cursor);
+        char* name = next_token(&cursor); // layer name — unused, skipped
+        char* in_tok = next_token(&cursor);
+        char* out_tok = next_token(&cursor);
         int in_n = 0, out_n = 0;
-        if (fscanf(f, "%255s %255s %d %d", type, name, &in_n, &out_n) != 4) {
+        if (type == nullptr || name == nullptr || in_tok == nullptr ||
+            out_tok == nullptr ||
+            sscanf(in_tok, "%d", &in_n) != 1 ||
+            sscanf(out_tok, "%d", &out_n) != 1 || in_n < 0 || out_n < 0) {
             ok = false;
             break;
         }
         const bool is_noop = strcmp(type, "Noop") == 0;
-        for (int k = 0; k < in_n; k++) {
-            int b;
-            if (fscanf(f, "%d", &b) != 1) { ok = false; break; }
+        if (strcmp(type, "Reshape") == 0) *has_reshape = true;
+        bool line_ok = true;
+        for (int k = 0; line_ok && k < in_n; k++) {
+            char* b = next_token(&cursor);
+            if (b == nullptr) {
+                line_ok = false;
+                break;
+            }
             consumed.insert(b);
             if (is_noop) noop_consumed.insert(b);
         }
-        for (int k = 0; ok && k < out_n; k++) {
-            int b;
-            if (fscanf(f, "%d", &b) != 1) { ok = false; break; }
+        for (int k = 0; line_ok && k < out_n; k++) {
+            char* b = next_token(&cursor);
+            if (b == nullptr) {
+                line_ok = false;
+                break;
+            }
             produced.insert(b);
         }
+        // Remaining tokens on the line (key=value layer params) are
+        // intentionally ignored.
+        ok = line_ok;
     }
     fclose(f);
     if (!ok) return false;
-    for (int b : produced) {
+    for (const auto& b : produced) {
         if (consumed.find(b) == consumed.end()) out->push_back(b);
     }
     if (out->empty()) {
-        for (int b : noop_consumed) out->push_back(b);
+        for (const auto& b : noop_consumed) out->push_back(b);
     }
-    std::sort(out->begin(), out->end());
     return !out->empty();
 }
 
@@ -205,9 +272,17 @@ int extract_all(hn_net* n, const ncnn::Mat& in, float* out, int out_cap,
     std::vector<ncnn::Mat> outs(n->output_blobs.size());
     size_t total = 0;
     for (size_t i = 0; i < n->output_blobs.size(); i++) {
-        if (ex.extract(n->output_blobs[i], outs[i]) != 0) return HN_ERR_EXTRACT;
+        // Name-based overload: blob tokens may be pnnx names ("out0") or
+        // numeric ids ("141") — both are strings in the param file.
+        if (ex.extract(n->output_blobs[i].c_str(), outs[i]) != 0) {
+            return HN_ERR_EXTRACT;
+        }
         const size_t elems = mat_elems(outs[i]);
         if (elems == 0) return HN_ERR_SHAPE;
+        // Typical extract outputs are unpacked. A packed Mat (elempack>1)
+        // would need an explicit unpack before copy_mat — copying its raw
+        // layout would emit garbage, so surface it as a shape error.
+        if (outs[i].elempack != 1) return HN_ERR_SHAPE;
         total += elems;
         if (shapes != nullptr && (int)(i + 1) * 4 <= shape_cap) {
             fill_shape(outs[i], shapes + i * 4);
@@ -243,6 +318,12 @@ hn_net_t hn_create(const hn_options_t* opts) {
                 n->norm[i] = opts->norm[i];
             }
             if (opts->input_blob != nullptr) n->input_blob = opts->input_blob;
+            // Appended (post-V1) fields — only read when present.
+            if (opts->struct_size >=
+                (uint32_t)(offsetof(hn_options_t, warmup_h) + sizeof(int))) {
+                n->warmup_w = opts->warmup_w;
+                n->warmup_h = opts->warmup_h;
+            }
         }
         set_options(n->net, opts ? opts->use_vulkan : 0,
                     opts ? opts->device_index : -1);
@@ -259,34 +340,51 @@ int hn_load(hn_net_t net, const char* param_path, const char* bin_path) {
     }
     auto* n = as_net(net);
     try {
-        if (!parse_output_blobs(param_path, &n->output_blobs)) {
+        n->has_reshape = false;
+        n->output_blobs.clear();
+        if (!parse_output_blobs(param_path, &n->output_blobs,
+                                &n->has_reshape)) {
             return HN_ERR_PARAM;
         }
         if (n->net.load_param(param_path) != 0) return HN_ERR_PARAM;
         if (n->net.load_model(bin_path) != 0) return HN_ERR_BIN;
         n->loaded = true;
-        // Warm-up for shape hints: 64x64 zeros through the real input
-        // path. Failure is non-fatal — hints stay zero and callers fall
-        // back to the capacity-retry on the first real extract.
-        const int ch = channel_count(n->pixel_format);
-        std::vector<uint8_t> zeros(
-            (size_t)kWarmupSize * kWarmupSize * ch, 0);
-        ncnn::Mat in = ncnn::Mat::from_pixels(
-            zeros.data(), pixel_type(n->pixel_format),
-            kWarmupSize, kWarmupSize);
-        // substract_mean_normalize reads norm[channels] entries — one per
-        // channel, NOT a single shared scalar (a 1-element array reads OOB
-        // and corrupts G/B planes).
-        in.substract_mean_normalize(n->mean, n->norm);
+        // Warm-up for shape hints: zeros through the real input path.
+        // Failure is non-fatal — hints stay zero and callers fall back
+        // to the capacity-retry on the first real extract.
+        //
+        // SAFETY: graphs containing a Reshape are usually locked to the
+        // trained input size (their reshape dims are fixed — the
+        // production pnnx models hardcode 640x640-derived shapes), and
+        // ncnn's Reshape does NOT validate element totals: a forward at
+        // the wrong size reads/writes out of bounds and corrupts the
+        // heap (verified: heap-buffer-overflow in Reshape_x86 with a
+        // 64x64 input on all 4 production models; clean at 640x640).
+        // So the AUTO warm-up (64x64) only runs for Reshape-free graphs;
+        // callers that know the input size pass warmup_w/h explicitly.
+        const bool explicit_warmup = n->warmup_w > 0 && n->warmup_h > 0;
+        const bool do_warmup = explicit_warmup || !n->has_reshape;
         n->output_shape_hints.assign(n->output_blobs.size() * 5, 0);
-        ncnn::Extractor ex = n->net.create_extractor();
-        if (ex.input(n->input_blob.c_str(), in) == 0) {
-            for (size_t i = 0; i < n->output_blobs.size(); i++) {
-                ncnn::Mat om;
-                if (ex.extract(n->output_blobs[i], om) == 0 &&
-                    mat_elems(om) > 0) {
-                    n->output_shape_hints[i * 5] = om.dims;
-                    fill_shape(om, &n->output_shape_hints[i * 5 + 1]);
+        if (do_warmup) {
+            const int ww = explicit_warmup ? n->warmup_w : kWarmupSize;
+            const int wh = explicit_warmup ? n->warmup_h : kWarmupSize;
+            const int ch = channel_count(n->pixel_format);
+            std::vector<uint8_t> zeros((size_t)ww * wh * ch, 0);
+            ncnn::Mat in = ncnn::Mat::from_pixels(
+                zeros.data(), pixel_type(n->pixel_format), ww, wh);
+            // substract_mean_normalize reads norm[channels] entries — one
+            // per channel, NOT a single shared scalar (a 1-element array
+            // reads OOB and corrupts G/B planes).
+            in.substract_mean_normalize(n->mean, n->norm);
+            ncnn::Extractor ex = n->net.create_extractor();
+            if (ex.input(n->input_blob.c_str(), in) == 0) {
+                for (size_t i = 0; i < n->output_blobs.size(); i++) {
+                    ncnn::Mat om;
+                    if (ex.extract(n->output_blobs[i].c_str(), om) == 0 &&
+                        mat_elems(om) > 0) {
+                        n->output_shape_hints[i * 5] = om.dims;
+                        fill_shape(om, &n->output_shape_hints[i * 5 + 1]);
+                    }
                 }
             }
         }
@@ -317,7 +415,8 @@ int hn_output_shape(hn_net_t net, int out_index, int32_t shape[4]) {
 int hn_extract(hn_net_t net, const uint8_t* pixels, int w, int h,
                float* out, int out_cap, int32_t* shapes, int shape_cap,
                int32_t* required_out) {
-    if (net == nullptr || pixels == nullptr || w <= 0 || h <= 0) {
+    if (net == nullptr || pixels == nullptr || w <= 0 || h <= 0 ||
+        (out == nullptr && out_cap > 0)) {
         return HN_ERR_INVALID;
     }
     auto* n = as_net(net);
@@ -337,7 +436,7 @@ int hn_extract_f32(hn_net_t net, const float* data, const int32_t* shape,
                    int dims, float* out, int out_cap, int32_t* shapes,
                    int shape_cap, int32_t* required_out) {
     if (net == nullptr || data == nullptr || shape == nullptr ||
-        dims < 1 || dims > 4) {
+        dims < 1 || dims > 4 || (out == nullptr && out_cap > 0)) {
         return HN_ERR_INVALID;
     }
     auto* n = as_net(net);

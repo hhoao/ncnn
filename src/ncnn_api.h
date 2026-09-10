@@ -70,6 +70,8 @@ typedef struct {
     float norm[3];          /// all-1 = no scaling; YOLO convention = 1/255
     int pixel_format;       /// enum hn_pixel_format
     const char* input_blob; /// NULL = "in0" (ultralytics convention)
+    int warmup_w;           /// warm-up width for shape hints; 0 = auto
+    int warmup_h;           /// warm-up height for shape hints; 0 = auto
 } hn_options_t;
 
 #define HN_OPTIONS_V1_SIZE \
@@ -81,15 +83,25 @@ HN_API hn_net_t hn_create(const hn_options_t* opts);
 
 /// Load param+bin. Discovers graph output blobs by parsing the param
 /// file (blobs produced but never consumed) and runs a warm-up (64x64
-/// zeros) to record output shapes as hints for hn_output_shape.
+/// zeros by default, or warmup_w x warmup_h from the options) to record
+/// output shapes as hints for hn_output_shape. Auto warm-up is SKIPPED
+/// when the param contains a Reshape layer: such graphs are usually
+/// locked to the trained input size (fixed reshape dims), and ncnn's
+/// Reshape does not validate element totals — warming up at the wrong
+/// size reads/writes out of bounds and corrupts the heap. Callers that
+/// know the input size (e.g. from model metadata) pass warmup_w/h
+/// explicitly to get hints; otherwise the first hn_extract's
+/// capacity-retry provides the sizes.
 HN_API int hn_load(hn_net_t net, const char* param_path, const char* bin_path);
 
 /// Number of graph output blobs (0 before a successful hn_load).
 HN_API int hn_output_count(hn_net_t net);
 
-/// Fill shape[0..3] = (w, h, d|1, c) for output `out_index` — 4 entries
-/// are always written, padded with 1s. Returns the blob's ncnn dims, or
-/// 0 when the warm-up hint is unavailable (size via hn_extract retry).
+/// Fill shape[0..3] = (w, h, d|1, c) for output `out_index`, padded with
+/// 1s. shape[] is only written when a warm-up hint exists, i.e. the
+/// return is non-zero; a return of 0 leaves shape untouched (get the
+/// size via the hn_extract capacity-retry). Returns the blob's ncnn
+/// dims, or 0 when the hint is unavailable.
 HN_API int hn_output_shape(hn_net_t net, int out_index, int32_t shape[4]);
 
 /// Run inference on a pixel buffer (layout per options.pixel_format,
