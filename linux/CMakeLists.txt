@@ -131,7 +131,13 @@ endif()
 # still-default /usr/local and fail with Permission denied). A staged
 # file under the final name flows through the standard mechanism
 # untouched by prefix handling.
-file(REAL_PATH "${NCNN_ROOT_DIR}/lib/libncnn.so.1" NCNN_REAL_LIB)
+# get_filename_component(REALPATH) resolves symlinks (libncnn.so.1 ->
+# libncnn.so.1.0.<ver>) and works on CMake 3.10+; file(REAL_PATH) would
+# need 3.19 and this file pins 3.10 by contract. On a missing path it
+# returns the input unchanged — same dev-warning path as REAL_PATH's
+# fallback, and the EXISTS() check below handles both.
+get_filename_component(NCNN_REAL_LIB
+  "${NCNN_ROOT_DIR}/lib/libncnn.so.1" REALPATH)
 set(NCNN_STAGED_LIB "${CMAKE_CURRENT_BINARY_DIR}/bundle_stage/libncnn.so.1")
 if(EXISTS "${NCNN_REAL_LIB}")
   # Present at configure time (x86_64 configure-time download, or CI's

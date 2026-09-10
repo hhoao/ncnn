@@ -35,7 +35,7 @@ const int hnErrException = -8;
 const int hnMaxGpu = 8;
 const int hnNameMax = 128;
 
-/// int32 fields — C struct is 4*int + uint32 = 20 bytes, aligned.
+/// int32 fields — C struct is 3*int32 + uint32 = 16 bytes, aligned.
 final class HnGpuDevice extends Struct {
   @Int32()
   external int index;

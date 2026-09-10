@@ -7,7 +7,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = "ncnn"
-  s.version          = "1.0.0"
+  s.version          = "0.1.0"
   s.summary          = "ncnn (Vulkan) inference bindings for Dart/Flutter"
   s.description      = "Thin C shim over ncnn::Net, exposed via dart:ffi."
   s.homepage         = "https://github.com/hhoao/ncnn"

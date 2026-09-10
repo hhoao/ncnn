@@ -180,7 +180,8 @@ class NcnnNet {
   }
 
   /// Shared capacity-retry loop: calls [fn] with an out buffer; on
-  /// HN_ERR_CAPACITY retries once with the required size.
+  /// HN_ERR_CAPACITY retries with the required size (until success or
+  /// a hard error).
   List<NcnnOutput> _run(
       int Function(Pointer<Float>, Pointer<Int32>, Pointer<Int32>) fn) {
     var cap = _capHint;
