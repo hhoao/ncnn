@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert' show utf8;
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -63,13 +64,15 @@ class NcnnHelperFrames {
   }) {
     final b = BytesBuilder();
     _u32(b, 1);
-    final param = paramPath.codeUnits;
-    final bin = binPath.codeUnits;
+    // Paths must be UTF-8 bytes — codeUnits would write UTF-16 code units
+    // as single bytes and silently corrupt non-ASCII paths ('C:/模型/…').
+    final param = utf8.encode(paramPath);
+    final bin = utf8.encode(binPath);
     _u32(b, param.length);
     _bytes(b, param);
     _u32(b, bin.length);
     _bytes(b, bin);
-    final blob = (options.inputBlob ?? 'in0').codeUnits;
+    final blob = utf8.encode(options.inputBlob ?? 'in0');
     _u32(b, 48 + blob.length); // fixed part 48 + blob bytes
     _i32(b, options.useVulkan ? 1 : 0);
     _i32(b, options.deviceIndex);
@@ -154,6 +157,9 @@ class NcnnHelperFrames {
 /// same shim runs flawlessly in a plain process, so on Windows GPU
 /// inference goes through this helper; requests are framed
 /// little-endian over stdin/stdout (see ncnn_helper_main.cpp).
+///
+/// Strict request/response: callers must not issue concurrent requests
+/// (the engine serializes access).
 class NcnnHelperProcess {
   NcnnHelperProcess._(this._process);
 
@@ -162,6 +168,11 @@ class NcnnHelperProcess {
   int _chunkOffset = 0;
   Completer<void>? _drained;
   bool _disposed = false;
+
+  /// Latch set when the helper's stdout closed or errored — even if no
+  /// read was in flight at the time, so a later read fails fast instead
+  /// of hanging forever on a dead pipe.
+  Object? _closedError;
 
   /// Shapes of the loaded model's outputs (filled by [load]).
   List<List<int>> outputShapes = const [];
@@ -198,22 +209,38 @@ class NcnnHelperProcess {
         helper._chunks.add(data as Uint8List);
         helper._drained?.complete();
       },
-      onDone: () =>
-          helper._drained?.completeError(StateError('helper closed the pipe')),
-      onError: (Object e) => helper._drained?.completeError(e),
+      onDone: () => helper._fail(StateError('helper stdout closed')),
+      onError: (Object e) => helper._fail(e),
     );
     return helper;
   }
 
+  /// Record the pipe failure and wake any pending read. Safe to call
+  /// after dispose (kill → onDone): with no read in flight the latch is
+  /// just recorded, never surfaced as an unhandled async error.
+  void _fail(Object error) {
+    _closedError ??= error;
+    final d = _drained;
+    if (d != null && !d.isCompleted) d.completeError(error);
+  }
+
   Future<Uint8List> _readExact(int len) async {
+    if (_disposed) throw StateError('helper disposed');
     final result = Uint8List(len);
     var copied = 0;
     while (copied < len) {
       while (_chunks.isEmpty) {
+        if (_disposed) throw StateError('helper disposed');
+        // The helper may have died between requests — fail fast with
+        // the recorded error instead of awaiting a completer that will
+        // never complete.
+        final closed = _closedError;
+        if (closed != null) throw closed;
         final done = Completer<void>();
         _drained = done;
         await done.future;
         _drained = null;
+        if (_disposed) throw StateError('helper disposed');
       }
       final chunk = _chunks.first;
       final take = (chunk.length - _chunkOffset).clamp(0, len - copied);
@@ -270,6 +297,9 @@ class NcnnHelperProcess {
     final status = hd.getInt32(0, Endian.little);
     final count = hd.getUint32(4, Endian.little);
     if (status != 0) {
+      // The helper already destroyed the previous net on a reload —
+      // stale shape hints must not survive a failed load.
+      outputShapes = const [];
       throw StateError('helper load failed with status $status');
     }
     final body = count > 0 ? await _readExact(count * 20) : Uint8List(0);

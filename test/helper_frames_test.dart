@@ -54,6 +54,32 @@ void main() {
     expect(bytes.length, f + 32);
   });
 
+  test('loadRequest encodes non-ASCII paths as UTF-8 bytes', () {
+    final bytes = NcnnHelperFrames.loadRequest(
+      paramPath: '/模型/a.param',
+      binPath: '/模型/b.bin',
+      options: const NcnnOptions(),
+    );
+    final d = ByteData.sublistView(bytes);
+    expect(d.getUint32(0, Endian.little), 1); // cmd
+    final paramLen = d.getUint32(4, Endian.little);
+    // '/' (1) + 模型 (2×3 UTF-8 bytes) + '/a.param' (8) = 15 bytes —
+    // NOT the UTF-16 code-unit count (11).
+    expect(paramLen, 15);
+    // 模型 → E6 A8 A1 E5 9E 8B, followed by the ASCII suffix.
+    expect(bytes.sublist(8, 8 + paramLen), [
+      0x2F, 0xE6, 0xA8, 0xA1, 0xE5, 0x9E, 0x8B, // /模型
+      0x2F, 0x61, 0x2E, 0x70, 0x61, 0x72, 0x61, 0x6D, // /a.param
+    ]);
+    final binLen = d.getUint32(8 + paramLen, Endian.little);
+    // '/' (1) + 模型 (6) + '/b.bin' (6) = 13 bytes (code units: 9).
+    expect(binLen, 13);
+    expect(
+      bytes.sublist(8 + paramLen + 4, 8 + paramLen + 4 + binLen),
+      utf8.encode('/模型/b.bin'),
+    );
+  });
+
   test('parseLoadResponse reads status + shape rows', () {
     final b = BytesBuilder();
     void u32(int v) =>

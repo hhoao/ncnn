@@ -49,6 +49,13 @@ Models come from `ultralytics`:
 `model.ncnn.bin` + `metadata.yaml` (class names). Input blobs are named
 `in0`/`out0`; preprocessing is `x/255` with no mean subtraction.
 
+## Caveats
+
+- **Windows helper, non-ASCII paths**: paths are sent to `ncnn_helper` as
+  UTF-8 bytes and passed verbatim to ncnn (`fopen`). On Windows, non-ASCII
+  model paths therefore depend on the helper process's active code page
+  being UTF-8 — a known upstream ncnn limitation.
+
 ## Why ncnn
 
 See the migration discussion in the huji repo — parity with ORT is

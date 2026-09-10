@@ -238,6 +238,11 @@ int main(void) {
         if (cmd == 0) break; // quit
 
         if (cmd == 1) { // load
+            // Paths arrive as UTF-8 bytes (Dart utf8-encodes them) and are
+            // passed verbatim to hn_load/ncnn (fopen). On Windows, non-ASCII
+            // paths therefore depend on the process's active code page being
+            // UTF-8 — a known upstream ncnn limitation, documented in the
+            // package README as a caveat.
             char *param = NULL, *bin = NULL, *blob = NULL;
             int32_t use_vulkan = 0, device_index = -1, pixel_format = 0;
             int32_t warmup_w = 0, warmup_h = 0;
