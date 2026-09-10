@@ -1,0 +1,44 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  analyze-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: dart format --set-exit-if-changed --output=none .
+      - run: flutter analyze
+      - run: flutter test
+
+  build-example-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Install Linux build deps
+        run: sudo apt-get update && sudo apt-get install -y ninja-build libgtk-3-dev libvulkan-dev
+      - run: flutter pub get
+        working-directory: example
+      - name: Build example (downloads ncnn, compiles shim)
+        run: flutter build linux --debug
+        working-directory: example
+      - name: Assert apple source copies match src/
+        run: |
+          ./tool/sync_apple_sources.sh
+          git diff --exit-code ios/src macos/src
+      - name: Symbol coverage against the built plugin
+        run: |
+          flutter test test/symbol_coverage_test.dart
+        env:
+          NCNN_DART_LIB_DIR: ${{ github.workspace }}/example/build/linux/x64/debug/bundle/lib
