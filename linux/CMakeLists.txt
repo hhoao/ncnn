@@ -105,20 +105,56 @@ if(TARGET ncnn_ext)
   add_dependencies(${PLUGIN_NAME} ncnn_ext)
 endif()
 
-# Bundle the plugin and libncnn.so.1 (the real file, not the dev-time
-# libncnn.so symlink — install(FILES) follows the symlink and then the
-# link "libncnn.so -> libncnn.so.1" lands dangling in the bundle) so the
-# app ships both; the Vulkan loader itself stays a host system library.
-# Exactly ONE PARENT_SCOPE set — a second set() would clobber this value
-# (PARENT_SCOPE writes never accumulate) and silently drop libs from the
-# bundle (see the Windows variant's note for the same bug).
+# Bundle the plugin and libncnn.so.1 via the standard bundled-libraries
+# mechanism. Exactly ONE PARENT_SCOPE set — a second set() would clobber
+# this value (PARENT_SCOPE writes never accumulate) and silently drop
+# libs from the bundle (see the Windows variant's note for the same
+# bug).
+# The real ncnn file must ship under its SONAME name (libncnn.so.1):
+# the plugin's DT_NEEDED is "libncnn.so.1" and the dynamic loader
+# resolves by FILE NAME, so shipping the versioned file name
+# (libncnn.so.1.0.<ver>) left the plugin unloadable on any machine
+# without the build tree ("libncnn.so.1: cannot open shared object
+# file") — masked locally by the plugin's absolute dev-tree RUNPATH, and
+# in AppImages by linuxdeploy resolving libncnn.so.1 into usr/lib while
+# the plugin was still named libhuji_ncnn_plugin.so (the renamed
+# libncnn_plugin.so matches the packaging script's libncnn* exclusion
+# glob, so nothing deploys it anymore).
 # Resolve the real file behind the libncnn.so -> libncnn.so.1 ->
-# libncnn.so.1.0.<ver> symlink chain — install(FILES) on a symlink copies
-# the LINK, leaving a dangling bundle entry (libncnn.so.1 in bundle/lib
-# pointed at a name that was never installed; the plugin's RUNPATH masked
-# it by loading from the build dir instead).
+# libncnn.so.1.0.<ver> symlink chain — install(FILES) on a symlink
+# copies the LINK, leaving a dangling bundle entry — and STAGE a copy
+# already named libncnn.so.1: the app-side install(FILES) fed by this
+# list cannot rename, and a direct install(FILES ... RENAME) against
+# CMAKE_INSTALL_PREFIX is wrong on a first-ever configure (the app
+# forces CMAKE_INSTALL_PREFIX to the bundle dir only AFTER plugins are
+# add_subdirectory'd, so a fresh configure would resolve the
+# still-default /usr/local and fail with Permission denied). A staged
+# file under the final name flows through the standard mechanism
+# untouched by prefix handling.
 file(REAL_PATH "${NCNN_ROOT_DIR}/lib/libncnn.so.1" NCNN_REAL_LIB)
+set(NCNN_STAGED_LIB "${CMAKE_CURRENT_BINARY_DIR}/bundle_stage/libncnn.so.1")
+if(EXISTS "${NCNN_REAL_LIB}")
+  # Present at configure time (x86_64 configure-time download, or CI's
+  # pre-extracted NCNN_ROOT_DIR) — a real input dependency.
+  set(NCNN_STAGE_DEPENDS "${NCNN_REAL_LIB}")
+else()
+  # aarch64 source build: the file appears only at ncnn_ext build time;
+  # a missing ninja input would abort the build, so order via the
+  # target dependency below instead.
+  set(NCNN_STAGE_DEPENDS "")
+endif()
+add_custom_command(
+  OUTPUT "${NCNN_STAGED_LIB}"
+  COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/bundle_stage"
+  COMMAND ${CMAKE_COMMAND} -E copy "${NCNN_REAL_LIB}" "${NCNN_STAGED_LIB}"
+  DEPENDS ${NCNN_STAGE_DEPENDS})
+add_custom_target(ncnn_stage_bundle_lib ALL DEPENDS "${NCNN_STAGED_LIB}")
+if(TARGET ncnn_ext)
+  # aarch64: the real file is produced by the ExternalProject — keep the
+  # staging copy ordered after it.
+  add_dependencies(ncnn_stage_bundle_lib ncnn_ext)
+endif()
 set(ncnn_bundled_libraries
   $<TARGET_FILE:${PLUGIN_NAME}>
-  "${NCNN_REAL_LIB}"
+  "${NCNN_STAGED_LIB}"
   PARENT_SCOPE)
