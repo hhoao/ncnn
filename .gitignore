@@ -1,0 +1,12 @@
+# Downloaded prebuilt ncnn / MoltenVK frameworks (podspec prepare_command).
+macos/build/
+ios/build/
+# Build artifacts — CRITICAL for publish: pub reads only the package's own
+# .gitignore, and android/.cxx is ~1 GB of NDK build output.
+.cxx/
+build/
+.dart_tool/
+*.iml
+.idea/
+# Library packages must not ship a lockfile.
+pubspec.lock

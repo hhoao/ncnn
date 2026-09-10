@@ -1,0 +1,37 @@
+name: ncnn
+description: >
+  ncnn (Vulkan) inference bindings for Dart/Flutter — a thin C shim over
+  ncnn::Net exposed via dart:ffi. Runs image inference on CPU or any
+  Vulkan-capable GPU (NVIDIA / AMD / Intel / Apple via MoltenVK / Android),
+  with automatic CPU fallback. Ships ultralytics YOLO export conventions
+  as defaults.
+version: 0.1.0
+
+environment:
+  sdk: ^3.4.0
+  flutter: '>=3.22.0'
+
+dependencies:
+  ffi: ^2.1.0
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  # FFI-only plugin: no method channel class, native lib resolved by name.
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      ios:
+        ffiPlugin: true
+      linux:
+        ffiPlugin: true
+      macos:
+        ffiPlugin: true
+      windows:
+        ffiPlugin: true
