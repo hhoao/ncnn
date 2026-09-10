@@ -17,7 +17,7 @@
 
 #include "ncnn_api.h"
 
-static void *volatile ncnn_link_anchors[6];
+static void *volatile ncnn_link_anchors[9];
 
 @interface NcnnLinkAnchor : NSObject
 @end
@@ -28,10 +28,13 @@ static void *volatile ncnn_link_anchors[6];
   // Never executed beyond the stores; addresses must simply be resolved.
   ncnn_link_anchors[0] = (void *)&hn_create;
   ncnn_link_anchors[1] = (void *)&hn_load;
-  ncnn_link_anchors[2] = (void *)&hn_predict;
-  ncnn_link_anchors[3] = (void *)&hn_destroy;
-  ncnn_link_anchors[4] = (void *)&hn_gpu_count;
-  ncnn_link_anchors[5] = (void *)&hn_gpu_devices;
+  ncnn_link_anchors[2] = (void *)&hn_output_count;
+  ncnn_link_anchors[3] = (void *)&hn_output_shape;
+  ncnn_link_anchors[4] = (void *)&hn_extract;
+  ncnn_link_anchors[5] = (void *)&hn_extract_f32;
+  ncnn_link_anchors[6] = (void *)&hn_destroy;
+  ncnn_link_anchors[7] = (void *)&hn_gpu_count;
+  ncnn_link_anchors[8] = (void *)&hn_gpu_devices;
 }
 
 @end
