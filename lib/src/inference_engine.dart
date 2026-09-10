@@ -80,15 +80,25 @@ class NcnnInferenceEngine {
   bool get isLoaded => _loaded;
   bool get usingGpu => _usingGpu;
 
-  /// Discrete first, then ncnn rough_score (higher = faster).
+  /// Discrete first, then ncnn rough_score (higher = faster), then index.
+  ///
+  /// Type-3 (software Vulkan, e.g. llvmpipe) devices are excluded before
+  /// ranking: their rough_score can outscore a real discrete GPU (observed
+  /// with llvmpipe beating an Intel Arc), which would select a software
+  /// device that runs slower than plain CPU. If only type-3 devices exist,
+  /// returns null so callers fall back to CPU.
   static NcnnGpuDevice? bestDevice(List<NcnnGpuDevice> devices) {
-    if (devices.isEmpty) return null;
-    final sorted = [...devices]..sort((a, b) {
+    final candidates = devices.where((d) => d.type != 3).toList();
+    if (candidates.isEmpty) return null;
+    final sorted = candidates
+      ..sort((a, b) {
         final aDiscrete = a.type == 0 ? 1 : 0;
         final bDiscrete = b.type == 0 ? 1 : 0;
         final cmp = bDiscrete.compareTo(aDiscrete);
         if (cmp != 0) return cmp;
-        return b.score.compareTo(a.score);
+        final scoreCmp = b.score.compareTo(a.score);
+        if (scoreCmp != 0) return scoreCmp;
+        return b.index.compareTo(a.index);
       });
     return sorted.first;
   }
@@ -105,7 +115,10 @@ class NcnnInferenceEngine {
           paramPath: paramPath, binPath: binPath, options: options);
     } else {
       await _loadInProcess(
-          paramPath: paramPath, binPath: binPath, options: options);
+          paramPath: paramPath,
+          binPath: binPath,
+          options: options,
+          isWindows: isWindows);
     }
     _loaded = true;
     _classNames = fallbackClassNames;
@@ -117,13 +130,24 @@ class NcnnInferenceEngine {
     required String paramPath,
     required String binPath,
     required NcnnOptions options,
+    required bool isWindows,
   }) async {
-    var device = await _bestProbeDevice();
+    // On Windows the in-process GPU probe itself is the crash path
+    // (NVIDIA nvoglv64 access violation inside Flutter engine processes —
+    // see helper_process.dart). forceInProcess on Windows therefore means
+    // forced CPU: never touch in-process Vulkan at all.
+    final NcnnGpuDevice? device;
+    if (_forceInProcess && isWindows) {
+      device = null;
+      _log('ncnn using CPU (in-process forced)');
+    } else {
+      device = await _bestProbeDevice();
+    }
     _usingGpu = device != null;
     if (device != null) {
       _log('ncnn using Vulkan device ${device.index}: ${device.name} '
           '(type=${device.type}, score=${device.score})');
-    } else {
+    } else if (!(_forceInProcess && isWindows)) {
       _log('ncnn using CPU (no Vulkan device)');
     }
     try {

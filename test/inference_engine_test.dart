@@ -82,6 +82,79 @@ void main() {
     expect(NcnnInferenceEngine.bestDevice(const []), isNull);
   });
 
+  test('bestDevice excludes type-3 software Vulkan devices', () {
+    // llvmpipe (type 3) with the highest score must never win over a real
+    // discrete GPU.
+    final best = NcnnInferenceEngine.bestDevice([
+      _dev(3, 999, 0), // software Vulkan, highest score
+      _dev(0, 50, 1), // discrete
+    ]);
+    expect(best!.index, 1);
+    // Only software devices -> null (engine falls back to CPU).
+    expect(
+      NcnnInferenceEngine.bestDevice([_dev(3, 999, 0)]),
+      isNull,
+    );
+  });
+
+  test('bestDevice breaks score ties by higher index (deterministic)', () {
+    final best = NcnnInferenceEngine.bestDevice([
+      _dev(0, 80, 1),
+      _dev(0, 80, 2), // same type + score as index 1
+    ]);
+    expect(best!.index, 2);
+  });
+
+  test('Windows forceInProcess forces CPU without probing Vulkan', () async {
+    NcnnInferenceEngine.debugIsWindowsOverride = true;
+    final calls = <NcnnOptions>[];
+    var probeCalls = 0;
+    final logs = <String>[];
+    final engine = NcnnInferenceEngine(
+      forceInProcess: true,
+      gpuDeviceProbe: () async {
+        probeCalls++;
+        return [_dev(0, 80, 1)]; // would pick a discrete GPU
+      },
+      netLoader: (
+          {required paramPath, required binPath, required options}) async {
+        calls.add(options);
+        return _FakeNet(options);
+      },
+      onLog: logs.add,
+    );
+    await engine.loadModel(paramPath: '/a.param', binPath: '/b.bin');
+    expect(probeCalls, 0, reason: 'the probe is the crash path on Windows');
+    expect(calls.length, 1);
+    expect(calls[0].useVulkan, isFalse);
+    expect(calls[0].deviceIndex, -1);
+    expect(engine.usingGpu, isFalse);
+    expect(logs, contains('ncnn using CPU (in-process forced)'));
+  });
+
+  test('non-Windows forceInProcess still probes for a GPU device', () async {
+    final calls = <NcnnOptions>[];
+    var probeCalls = 0;
+    final engine = NcnnInferenceEngine(
+      forceInProcess: true,
+      gpuDeviceProbe: () async {
+        probeCalls++;
+        return [_dev(0, 80, 1)];
+      },
+      netLoader: (
+          {required paramPath, required binPath, required options}) async {
+        calls.add(options);
+        return _FakeNet(options);
+      },
+    );
+    await engine.loadModel(paramPath: '/a.param', binPath: '/b.bin');
+    expect(probeCalls, 1);
+    expect(calls.length, 1);
+    expect(calls[0].useVulkan, isTrue);
+    expect(calls[0].deviceIndex, 1);
+    expect(engine.usingGpu, isTrue);
+  });
+
   test('non-Windows: GPU load failure falls back to CPU', () async {
     final calls = <NcnnOptions>[];
     final engine = NcnnInferenceEngine(
