@@ -97,6 +97,7 @@ class NcnnOptions {
 
   /// Frees a pointer returned by [toNative] (including the blob string).
   static void freeNative(Pointer<native.HnOptions> p) {
+    if (p == nullptr) return;
     calloc.free(p.ref.inputBlob);
     calloc.free(p);
   }
