@@ -1,62 +1,119 @@
 # ncnn
 
-ncnn (Vulkan) inference bindings for the huji Flutter app — replaces the
-former ONNX Runtime + CUDA/cuDNN stack (~1.8 GB in the AppImage) with a
-~10 MB runtime that accelerates on **any** Vulkan GPU (NVIDIA / AMD / Intel /
-Apple via MoltenVK discovery / Android), with automatic CPU fallback.
+[ncnn](https://github.com/Tencent/ncnn) inference bindings for Dart and
+Flutter — a thin C shim over `ncnn::Net` exposed via `dart:ffi`.
 
-## Layout
+Runs image inference on CPU or **any Vulkan-capable GPU** (NVIDIA /
+AMD / Intel / Apple via MoltenVK / Android), with automatic CPU
+fallback. Five platforms: Android, iOS, Linux, macOS, Windows.
 
-- `src/ncnn_api.{h,cpp}` — thin `extern "C"` shim over `ncnn::Net`
-  (Vulkan toggle, device selection, `from_pixels` RGB input, GPU enumeration)
-- `lib/ncnn.dart` — `NcnnNet.load/predict/dispose`, `NcnnRuntime.gpuDevices`
+## Quick start
+
+```dart
+import 'package:ncnn/ncnn.dart';
+
+final engine = NcnnInferenceEngine();
+await engine.loadModel(
+  paramPath: 'model.ncnn.param',
+  binPath: 'model.ncnn.bin',
+  fallbackClassNames: ['fireball', 'pickball'], // or parse metadata.yaml
+);
+
+// RGB24 bytes (w*h*3), e.g. from your own decode/letterbox step.
+final logits = await engine.predict(rgb, width, height);
+final top = topK(logits, 5);
+```
+
+Defaults follow the **ultralytics ncnn export** convention
+(`YOLO('best.pt').export(format='ncnn')`): input blob `in0`,
+preprocessing `x/255` (no mean), RGB input. Override anything:
+
+```dart
+final net = await NcnnNet.load(
+  paramPath: '...param', binPath: '...bin',
+  options: NcnnOptions(
+    useVulkan: true, deviceIndex: 0,
+    mean: [0.485, 0.456, 0.406], norm: [0.229, 0.224, 0.225],
+    inputBlob: 'data',
+    warmupWidth: 640, warmupHeight: 640, // exported imgsz (see below)
+  ),
+);
+final outputs = net.extract(rgb, w, h); // all output blobs + shapes
+```
+
+**Feed the model its exported input size.** Ultralytics exports are
+size-locked (`imgsz` in `metadata.yaml`): upstream ncnn `Reshape` does
+not validate element totals, so running a size-locked model at a
+different size corrupts memory instead of failing. Pass the exported
+size as `warmupWidth`/`warmupHeight` and extract at exactly that size.
+
+Non-image models: `net.extractF32(data, [w, h, d, c])` takes a raw
+float tensor (caller-preprocessed).
+
+## YOLO utilities
+
+```dart
+final outputs = await engine.extract(rgb, w, h);
+final dets = decodeYoloDetect(
+  outputs.first.data, outputs.first.shape, numClasses: 80);
+```
+
+Detect outputs of ultralytics exports are already decoded
+(DFL/box decode live in the graph); this performs per-class NMS.
+Classify: `argmax` / `topK` / `softmax`. `NcnnMetadata.tryParseClassNames`
+parses class names out of ultralytics `metadata.yaml`.
+
+## Platform notes
+
+| Platform | GPU | Notes |
+|---|---|---|
+| Linux | Vulkan | needs host Vulkan loader (`libvulkan`) — every distro ships it |
+| Windows | Vulkan via `ncnn_helper` | see below |
+| macOS | Vulkan via MoltenVK | MoltenVK vendored automatically by the podspec |
+| iOS | Vulkan via MoltenVK | same |
+| Android | Vulkan | falls back to CPU on non-Vulkan devices |
+
+### Windows: inference in a helper process
+
+ncnn's Vulkan device init crashes inside Flutter engine processes
+(NVIDIA `nvoglv64` access violation, reproduced and dump-verified; the
+engine's GL/D3D stack conflicts with the driver's Vulkan path). This
+package runs GPU inference in a tiny `ncnn_helper.exe` child process
+over stdin/stdout — full GPU acceleration, transparent to your code.
+Constructing `NcnnInferenceEngine(forceInProcess: true)` runs
+in-process on Windows too, but that forces CPU: the in-process GPU
+probe itself is the crash path.
+
+Known limitation: model paths are sent to the helper as UTF-8 bytes
+and passed verbatim to ncnn (`fopen`). Non-ASCII model paths on
+Windows therefore depend on the helper process's active code page
+being UTF-8 — a known upstream ncnn limitation.
+
+### Thread/isolate safety
+
+`NcnnNet.extract` is a synchronous FFI call (tens of ms on CPU). Never
+call it on the UI isolate — use `NcnnNet.extractInIsolate`, or run the
+engine in a worker isolate. One extract at a time per `NcnnNet`.
+
+## API stability
+
+C surface versioning: `hn_options_t` carries `struct_size`; fields are
+only ever appended, so bindings compiled against older structs keep
+working. Dart API follows semantic versioning.
+
+## Development
+
+- `src/ncnn_api.{h,cpp}` — the C shim (`extern "C"` over `ncnn::Net`).
+  `ios/src/` and `macos/src/` hold committed copies (CocoaPods globs
+  cannot escape the podspec dir; `dart pub publish` dereferences
+  symlinks) — run `tool/sync_apple_sources.sh` after editing the shim.
 - `lib/src/bindings.g.dart` — hand-maintained `dart:ffi` bindings
-- `linux|windows/` — CMake; downloads official ncnn prebuilt (Vulkan) and
-  bundles `libncnn`/`ncnn.dll`
-- `android/` — Gradle + CMake; links static ncnn android-vulkan per ABI
-- `ios|macos/` — CocoaPods; vendors ncnn apple/ios vulkan frameworks via
-  `prepare_command`. Apple-platform details:
-  - `macos/src/` and `ios/src/` are real directories containing **symlinks**
-    to the shared sources in `src/` — CocoaPods file patterns cannot escape
-    the podspec directory, and its `**` glob does not descend into
-    symlinked directories, so individual files are linked instead.
-  - ncnn's apple/ios-vulkan builds are **static** frameworks that reference
-    the Vulkan loader symbol `vkGetInstanceProcAddr`. Xcode no longer
-    bundles MoltenVK, so the podspecs also vendor the dynamic
-    `MoltenVK.xcframework` (auto-embedded into the app bundle by CocoaPods).
-  - `src/ncnn_link_anchor.m` is an ObjC `+load` anchor that references
-    every `hn_*` entry point. This is a pure-FFI pod — nothing references
-    them from native code — so without the anchor the linker would never
-    pull the shim out of the static archive (and dead-code-stripping would
-    drop it even if it did). `-force_load` is not usable because
-    CocoaPods' global `-ObjC` flag would double-load the generated dummy
-    ObjC member; `-Wl,-exported_symbol` breaks the Xcode 16 debug-dylib
-    stub launcher.
+  (no ffigen step); `test/symbol_coverage_test.dart` asserts every
+  bound symbol exists in the built plugin library.
+- The `example/` app loads a `.param`/`.bin` pair from disk and runs a
+  single classify pass.
 
-## Regenerating bindings
+## License
 
-The C surface is tiny and `lib/src/bindings.g.dart` is hand-maintained;
-if `src/ncnn_api.h` changes, regenerate with (requires LLVM):
-
-```
-dart run ffigen --config ffigen.yaml
-```
-
-## Model format
-
-Models come from `ultralytics`:
-`YOLO('best.pt').export(format='ncnn')` → `model.ncnn.param` +
-`model.ncnn.bin` + `metadata.yaml` (class names). Input blobs are named
-`in0`/`out0`; preprocessing is `x/255` with no mean subtraction.
-
-## Caveats
-
-- **Windows helper, non-ASCII paths**: paths are sent to `ncnn_helper` as
-  UTF-8 bytes and passed verbatim to ncnn (`fopen`). On Windows, non-ASCII
-  model paths therefore depend on the helper process's active code page
-  being UTF-8 — a known upstream ncnn limitation.
-
-## Why ncnn
-
-See the migration discussion in the huji repo — parity with ORT is
-bit-exact on all four autoclip models (`huji-algorithm/scripts/verify_ncnn_parity.py`).
+BSD 3-Clause. ncnn (BSD 3) and MoltenVK (Apache 2.0) are downloaded at
+build time — see THIRD_PARTY_NOTICES.md.

@@ -7,6 +7,8 @@ description: >
   as defaults.
 version: 0.1.0
 
+repository: https://github.com/hhoao/ncnn
+
 environment:
   sdk: ^3.4.0
   flutter: '>=3.22.0'

@@ -8,9 +8,9 @@
 Pod::Spec.new do |s|
   s.name             = "ncnn"
   s.version          = "1.0.0"
-  s.summary          = "ncnn (Vulkan) inference shim for huji"
+  s.summary          = "ncnn (Vulkan) inference bindings for Dart/Flutter"
   s.description      = "Thin C shim over ncnn::Net, exposed via dart:ffi."
-  s.homepage         = "https://github.com/hhoao/huji"
+  s.homepage         = "https://github.com/hhoao/ncnn"
   s.license          = "BSD-3-Clause"
   s.author           = { "hhoao" => "hhoao@users.noreply.github.com" }
   s.source           = { :path => "." }
@@ -59,10 +59,11 @@ Pod::Spec.new do |s|
     "HEADER_SEARCH_PATHS" => "$(PODS_CONFIGURATION_BUILD_DIR)/XCFrameworkIntermediates/ncnn/ncnn.framework/Headers",
   }
 
-  # NOTE: `src` is a real directory containing symlinks to the shared shim
-  # sources at the package root — CocoaPods file patterns cannot reference
-  # files outside the podspec directory (macos/), and its `**` glob does not
-  # descend into symlinked *directories*, so we link individual files.
+  # NOTE: `src` contains committed real-file copies of the shared shim
+  # sources at the package root — CocoaPods file patterns cannot
+  # reference files outside the podspec directory (macos/), and `dart pub
+  # publish` replaces symlinks with duplicate regular files anyway.
+  # tool/sync_apple_sources.sh keeps them in sync (CI asserts freshness).
   #
   # ncnn_link_anchor.m keeps the FFI entry points alive at app link
   # time (pure-FFI pod, nothing references hn_* natively; see the file).
