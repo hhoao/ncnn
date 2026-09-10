@@ -35,4 +35,27 @@ class NcnnMetadata {
     final indices = entries.keys.toList()..sort();
     return indices.map((i) => entries[i]!).toList();
   }
+
+  /// Returns the exported square input size (`imgsz`) from ultralytics
+  /// ncnn `metadata.yaml`, or null when it is absent or non-numeric.
+  ///
+  /// ultralytics emits either a scalar or a YAML list (the default for
+  /// its `yaml.dump`), so both layouts are accepted:
+  /// ```yaml
+  /// imgsz: 640
+  /// ```
+  /// ```yaml
+  /// imgsz:
+  /// - 640
+  /// - 640
+  /// ```
+  static int? tryParseImgSize(String yaml) {
+    final match = RegExp(
+      r'^imgsz:\s*(?:(\d+)|-\s*(\d+))',
+      multiLine: true,
+    ).firstMatch(yaml);
+    if (match == null) return null;
+    final parsed = int.tryParse(match.group(1) ?? match.group(2) ?? '');
+    return (parsed != null && parsed > 0) ? parsed : null;
+  }
 }

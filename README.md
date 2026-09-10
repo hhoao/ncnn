@@ -82,7 +82,11 @@ package runs GPU inference in a tiny `ncnn_helper.exe` child process
 over stdin/stdout — full GPU acceleration, transparent to your code.
 Constructing `NcnnInferenceEngine(forceInProcess: true)` runs
 in-process on Windows too, but that forces CPU: the in-process GPU
-probe itself is the crash path.
+probe itself is the crash path. Direct `NcnnNet` users who still want
+in-process Vulkan can opt back in by setting `NCNN_DART_ENABLE_VK=1`
+(or pinning `VK_ICD_FILENAMES` themselves) — the opt-out lives in the
+C shim (`windows_vulkan_allowed` in `src/ncnn_api.cpp`) — but this is
+at your own risk given the dump-verified engine-process crash above.
 
 Known limitation: model paths are sent to the helper as UTF-8 bytes
 and passed verbatim to ncnn (`fopen`). Non-ASCII model paths on
