@@ -36,14 +36,18 @@ class NcnnOptions {
   });
 
   /// ultralytics YOLO convention: RGB, x/255, no mean subtraction,
-  /// input blob "in0".
-  const NcnnOptions.yolo({this.useVulkan = false, this.deviceIndex = -1})
-      : mean = const [0, 0, 0],
+  /// input blob "in0". [warmupWidth]/[warmupHeight] pass the exported
+  /// imgsz through for shape hints (required for Reshape graphs — see
+  /// [NcnnOptions] and the helper protocol).
+  const NcnnOptions.yolo({
+    this.useVulkan = false,
+    this.deviceIndex = -1,
+    this.warmupWidth = 0,
+    this.warmupHeight = 0,
+  })  : mean = const [0, 0, 0],
         norm = const [_oneOver255, _oneOver255, _oneOver255],
         pixelFormat = NcnnPixelFormat.rgb,
-        inputBlob = null,
-        warmupWidth = 0,
-        warmupHeight = 0;
+        inputBlob = null;
 
   static const double _oneOver255 = 1.0 / 255.0;
 
