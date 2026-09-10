@@ -10,3 +10,8 @@ export 'src/bindings.g.dart'
 export 'src/options.dart';
 export 'src/runtime.dart';
 export 'src/net.dart';
+export 'src/inference_engine.dart';
+export 'src/metadata.dart';
+export 'src/helper_process.dart' show NcnnHelperProcess;
+export 'src/yolo/classify.dart';
+export 'src/yolo/detect.dart';
