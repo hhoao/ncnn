@@ -23,12 +23,32 @@ Pod::Spec.new do |s|
 
   s.prepare_command = <<-CMD
     mkdir -p build
-    if [ ! -d "#{ncnn_dir}/ncnn.framework" ]; then
+    if [ ! -d "#{ncnn_dir}/ncnn_static.framework" ]; then
       curl -fL --retry 3 \
         "https://github.com/Tencent/ncnn/releases/download/#{ncnn_version}/ncnn-#{ncnn_version}-ios-vulkan.zip" \
         -o build/ncnn-ios-vulkan.zip
       unzip -qo build/ncnn-ios-vulkan.zip -d #{ncnn_dir}
       rm -f build/ncnn-ios-vulkan.zip
+      # Rename the vendored bundle ncnn.framework -> ncnn_static.framework
+      # (binary too; the ar symbol table is untouched by a rename).
+      #
+      # WHY: the pod is named "ncnn", so the pod target's own product is
+      # ${PODS_CONFIGURATION_BUILD_DIR}/ncnn/ncnn.framework, while CocoaPods
+      # stages vendored frameworks into
+      # ${PODS_CONFIGURATION_BUILD_DIR}/XCFrameworkIntermediates/ncnn/. The
+      # app links with `-framework ncnn`, and FRAMEWORK_SEARCH_PATHS lists
+      # BOTH dirs — the pod-product dir sorts first, so ld resolves the flag
+      # to the pod's own (shim-only) framework and every ncnn:: C++ symbol
+      # comes out undefined (seen in hhoao/huji#2 macOS CI). Renaming the
+      # vendored bundle disambiguates the link flag: `-framework ncnn` keeps
+      # meaning the shim product, `-framework ncnn_static` the real library.
+      # (Pre-migration this pod was called huji_ncnn — no collision.)
+      fw="#{ncnn_dir}/ncnn.framework"
+      mv "$fw" "#{ncnn_dir}/ncnn_static.framework"
+      mv "#{ncnn_dir}/ncnn_static.framework/Versions/A/ncnn" \\
+         "#{ncnn_dir}/ncnn_static.framework/Versions/A/ncnn_static"
+      rm -f "#{ncnn_dir}/ncnn_static.framework/ncnn"
+      ln -s Versions/Current/ncnn_static "#{ncnn_dir}/ncnn_static.framework/ncnn_static"
     fi
     # ncnn's ios-vulkan build links against the Vulkan loader; on iOS the
     # loader is MoltenVK. Stream-extract just the dynamic xcframework.
@@ -41,7 +61,7 @@ Pod::Spec.new do |s|
   CMD
 
   s.vendored_frameworks = [
-    "#{ncnn_dir}/ncnn.framework",
+    "#{ncnn_dir}/ncnn_static.framework",
     "#{ncnn_dir}/glslang.framework",
     "#{ncnn_dir}/openmp.framework",
     "#{mvk_dir}/MoltenVK.xcframework",
@@ -50,10 +70,12 @@ Pod::Spec.new do |s|
   s.pod_target_xcconfig = {
     "DEFINES_MODULE" => "YES",
     "CLANG_CXX_LANGUAGE_STANDARD" => "c++17",
-    # The shim includes "ncnn/net.h". Vendored framework headers are not on
-    # the include path by default; point at the staged (platform-selected)
-    # Headers dir. "Prepare xcframeworks" phases populate it before compile.
-    "HEADER_SEARCH_PATHS" => "$(PODS_CONFIGURATION_BUILD_DIR)/XCFrameworkIntermediates/ncnn/ncnn.framework/Headers",
+    # The shim includes "ncnn/net.h". Unlike macOS (xcframeworks, staged by
+    # the copy script into XCFrameworkIntermediates), iOS vendored plain
+    # .framework bundles are NOT staged anywhere — point straight at the
+    # bundle's Headers dir (PODS_TARGET_SRCROOT = the ios/ dir of this
+    # package; the bundle rename happens in the prepare_command above).
+    "HEADER_SEARCH_PATHS" => "$(PODS_TARGET_SRCROOT)/build/ncnn-ios-vulkan/ncnn_static.framework/Headers",
   }
 
   # NOTE: `src` contains committed real-file copies of the shared shim
