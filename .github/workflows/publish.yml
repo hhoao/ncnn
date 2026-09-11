@@ -1,27 +1,13 @@
 name: publish
 on:
   push:
-    tags: ['v*']
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
 
+# OIDC trusted publishing (pub.dev Admin → Automated publishing, tag
+# pattern 'v{{version}}'). The dart-lang reusable workflow handles
+# authentication via a GitHub-signed OIDC token — no stored secrets.
+# Requires enabling the workflow on pub.dev's package admin page.
+# The workflow validates (analyze/test) before publishing.
 jobs:
   publish:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-      - run: flutter pub get
-      - run: flutter analyze
-      - run: flutter test
-      - name: Publish
-        run: dart pub publish --force
-        env:
-          # Publishing token created on pub.dev (Manage publishing tokens).
-          # See https://dart.dev/tools/pub/automated-publishing — if the
-          # env var name differs at execution time, follow those docs.
-          # NOTE: PUB_TOKEN semantics must be verified against those docs at
-          # the first real release (Task 13 confirms before publishing).
-          PUB_TOKEN: ${{ secrets.PUB_TOKEN }}
+    uses: dart-lang/setup-dart/.github/workflows/publish.yml@v1
